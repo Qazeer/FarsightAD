@@ -28,7 +28,7 @@ if executed with replication privileges, the
 partially hidden objects.
 
 For more information, refer to the
-[SANS DFIR Summit 2022 introductory slides](XXX).
+[SANS DFIR Summit 2022 introductory slides](https://github.com/Qazeer/FarsightAD/blob/main/SANS_DFIR_Summit_2022-Hunting_for_Active_Directory_persistence-v1.2.pdf).
 
 ## Prerequisite
 
