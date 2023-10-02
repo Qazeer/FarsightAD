@@ -12565,6 +12565,194 @@ Multipe CSV / JSON files written to disk, one file per GPO settings type.
     }
 }
 
+function Export-ADHuntingModifiedDisplaySpecifiers {
+    <#
+    .SYNOPSIS
+    
+    Export to a CSV / JSON file modified Display Specifier objects in Configuration naming context.
+    
+    Required Dependencies: ActiveDirectory module.
+    
+    .DESCRIPTION
+    
+    Export to a CSV / JSON file modified Display Modifier objects in Configuration naming context.
+    
+    Enumerate and parse each Display Specifier objects in Configuration naming context.
+    Display Specifiers modify how the ADUC administrative tool behaves and may make execute arbitrary code unwittingly to administrators.
+    
+    Helper functions to parse Key Credentials is from the ADComputerKeys PowerShell module.
+    
+    .PARAMETER Server
+    
+    Specifies the Active Directory Domain Services instance to connect to.
+    If set, passed through the cmdlets of the ActiveDirectory module as a default parameter.
+    
+    .PARAMETER Credential
+    
+    Specifies the user account credentials to use to perform this task.
+    If set, passed through the cmdlets of the ActiveDirectory module as a default parameter.
+    
+    .PARAMETER OutputFolder
+    
+    Specifies the CSV / JSON output file location (where the data will be exported to).
+    
+    .PARAMETER OutputType
+    
+    Specifies the format for the exported data (CSV or JSON). Defaults to CSV.
+    
+    .OUTPUTS
+    
+    CSV / JSON file written to disk.
+    
+    #>
+        
+        Param(
+            [Parameter(Mandatory=$False)][String]$Server = $null,
+            [Parameter(Mandatory=$False)][System.Management.Automation.PSCredential]$Credential = $null,
+            [Parameter(Mandatory=$False)]$PrivilegedSIDs = $null,
+            [Parameter(Mandatory=$False)][String]$OutputFolder,
+            [Parameter(Mandatory=$False)]
+                [ValidateSet("JSON","CSV")]
+                [string]$OutputType = "CSV"
+        )
+    
+        $PSDefaultParameterValues = @{}
+    
+        If (!$Server) {
+            $Server = (Get-ADDomain).PDCEmulator
+        }
+        $PSDefaultParameterValues.Add("*-AD*:Server", $Server)
+        $PSDefaultParameterValues.Add("*-ADHunting*:Server", $Server)
+    
+        If ($Credential) {
+            $PSDefaultParameterValues.Add("*-AD*:Credential", $Credential)
+            $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
+        }
+    
+        $DomainName = (Get-ADDomain).DNSRoot
+        $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
+        $OutputPath = "$OutputFolder\${DomainName}_Modified_DisplaySpecifiers_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
+        $Output = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+
+        Write-Host "[$($MyInvocation.MyCommand)][*] Enumerating modified Display Specifier objects in Configuration naming context..."
+    
+        $ADRootDSE = Get-ADRootDSE
+        $ConfigurationNamingContext = $ADRootDSE.configurationNamingContext      
+        
+        $DefaultDisplaySpecifierValues = @{
+            "computer-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "contact-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "container-Display" = "4,{AB790AA1-CDC1-478a-9351-B2E05CFCAD09} 3,{EEBD2F15-87EE-4F93-856F-6AD7E31787B3} 2,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6} 1,{6BA3F852-23C6-11D1-B91F-00A0C9A06D2D}"
+            "default-Display" = "0,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "domainDNS-Display" = "3,{2fb1b669-59ea-4f64-b728-05309f2c11c8} 2,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6} 1,{6BA3F852-23C6-11D1-B91F-00A0C9A06D2D}"
+            "domainPolicy-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "DS-UI-Default-Settings" = ""
+            "foreignSecurityPrincipal-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "group-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "inetOrgPerson-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "IntellimirrorGroup-Display" = ""
+            "IntellimirrorSCP-Display" = ""
+            "interSiteTransport-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "interSiteTransportContainer-Display" = "2,{6BA3F852-23C6-11D1-B91F-00A0C9A06D2D} 1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "licensingSiteSettings-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "localPolicy-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "lostAndFound-Display" = "0,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "msCOM-Partition-Display" = ""
+            "msCOM-PartitionSet-Display" = "1,{EEBD2F15-87EE-4F93-856F-6AD7E31787B3}"
+            "msDS-PasswordSettings-Display" = ""
+            "msMQ-Custom-Recipient-Display" = "1,{9e4ab987-3cca-4de0-ae36-3d163df44d36}"
+            "msMQ-Group-Display" = "1,{7e93454a-976a-4228-90f1-f7648010b8e6}"
+            "mSMQConfiguration-Display" = "1,{e62f8208-b71c-11d1-808d-00a024c48131}"
+            "mSMQEnterpriseSettings-Display" = "1,{2E4B37AB-CC8B-11D1-9C85-006008764D0E}"
+            "mSMQMigratedUser-Display" = "1,{fc5bf656-0b7f-11d3-883f-006094eb6406}"
+            "mSMQQueue-Display" = "1,{e62f8206-b71c-11d1-808d-00a024c48131}"
+            "mSMQSettings-Display" = "1,{d251b000-d46e-11d1-8091-00a024c48131}"
+            "mSMQSiteLink-Display" = "1,{87b31390-d46d-11d1-8091-00a024c48131}"
+            "nTDSConnection-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "nTDSDSA-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "nTDSService-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "nTDSSettings-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "nTDSSiteSettings-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "nTFRSMember-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "nTFRSReplicaSet-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "nTFRSSettings-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "nTFRSSubscriber-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "nTFRSSubscriptions-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "organizationalUnit-Display" = "2,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6} 1,{6BA3F852-23C6-11D1-B91F-00A0C9A06D2D}"
+            "pKICertificateTemplate-Display" = "0,{11BDCE06-D55C-44e9-BC0B-8655F89E8CC5}"
+            "printQueue-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "queryPolicy-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "remoteStorageServicePoint-Display" = "0,,RsAdmin.msc" # English value is "0,&Manage...,RsAdmin.msc"
+            "rpcContainer-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "server-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "serversContainer-Display" = "2,{6BA3F852-23C6-11D1-B91F-00A0C9A06D2D} 1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "serviceAdministrationPoint-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "site-Display" = "3,{bc019ba0-d46d-11d1-8091-00a024c48131} 2,{6BA3F852-23C6-11D1-B91F-00A0C9A06D2D} 1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "siteLink-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "siteLinkBridge-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "sitesContainer-Display" = "2,{6BA3F852-23C6-11D1-B91F-00A0C9A06D2D} 1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "subnet-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "subnetContainer-Display" = "2,{6BA3F852-23C6-11D1-B91F-00A0C9A06D2D} 1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "trustedDomain-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "user-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+            "volume-Display" = "1,{08eb4fa6-6ffd-11d1-b0e0-00c04fd8dca6}"
+        }
+
+        # Collecting every Display Modifiers containers, each one corresponding to a language
+        $DisplaySpecifiersContainers = Get-ADObject -SearchBase "CN=DisplaySpecifiers,$($ConfigurationNamingContext)" -LDAPFilter "(&(objectClass=container))" -SearchScope OneLevel
+        $AnalyzedDisplaySpecifiers = 0
+        foreach ($DSC in $DisplaySpecifiersContainers) {
+            $DisplaySpecifiers = Get-ADObject -SearchBase $DSC.DistinguishedName -Filter * -Properties classDisplayName,adminContextMenu,whenCreated,whenChanged -SearchScope OneLevel
+            foreach ($DS in $DisplaySpecifiers) {
+                try {
+                    if ($DS.Name -eq "remoteStorageServicePoint-Display") {
+                        # Removing the menu display name to match any language translation for 'remoteStorageServicePoint-Display'
+                        $DS.adminContextMenu = $DS.adminContextMenu -replace ',[^,]+,', ',,'
+                    }
+                    $AnalyzedDisplaySpecifiers++
+                    if ($DefaultDisplaySpecifierValues.ContainsKey($DS.Name)){
+                        if (($null -eq $DS.adminContextMenu) -or (($DS.adminContextMenu -join " ").ToString() -ne $DefaultDisplaySpecifierValues[$DS.Name])){
+                            $null = $Output.Add([PSCustomObject]@{
+                                Domain = $DomainName
+                                DisplaySpecifierContainer = $DSC.DistinguishedName
+                                DisplaySpecifierName = $DS.Name
+                                classDisplayName = $DS.classDisplayName.Value
+                                DisplaySpecifierDistinguishedName = $DS.DistinguishedName
+                                adminContextMenu = If ($null -eq $DS.adminContextMenu) {""} Else {($DS.adminContextMenu -join " ").ToString()}
+                                whenCreated = $DS.whenCreated.ToString('yyyy-MM-dd HH:mm:ss.fff')
+                                whenChanged = $DS.whenChanged.ToString('yyyy-MM-dd HH:mm:ss.fff')
+                            })
+                        } else {
+                            continue
+                        }
+                    } else {
+                        $null = $Output.Add([PSCustomObject]@{
+                            DisplaySpecifierName = $DS.Name
+                            adminContextMenu = If ($null -eq $DS.adminContextMenu) {$null} Else {($DS.adminContextMenu -join " ").ToString()}
+                        }) 
+                    }
+                }
+                catch {
+                    Write-Host -ForegroundColor DarkYellow "[Export-ADHuntingModifiedDisplaySpecifiers][-] Error while processing Display Specifier '$($DS.Name)' in container '$($DSC.DistinguishedName)'"
+                    Write-Host -ForegroundColor DarkYellow "[Export-ADHuntingModifiedDisplaySpecifiers][-] Exception: $_"
+                }
+            }
+        }
+
+        If ($Output.Count -gt 0) {
+            Write-Host "[Export-ADHuntingModifiedDisplaySpecifiers][*] Enumerated adminContextMenu of $($AnalyzedDisplaySpecifiers) Display Specifier objects."
+            Write-Host "[Export-ADHuntingModifiedDisplaySpecifiers][*] Found $($Output.Count) modified Display Specifier objects."
+            If ($OutputType -eq "CSV") {
+                $Output | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $OutputPath
+            }
+            ElseIf ($OutputType -eq "JSON") {
+                $Output | ConvertTo-Json -depth 100 | Out-File -Encoding UTF8 -Path $OutputPath
+            }
+            Write-Host -ForegroundColor Green "[Export-ADHuntingModifiedDisplaySpecifiers][+] Modified Display Specifier objects information written to '$OutputPath'"    
+        }
+        Else { Write-Host -ForegroundColor Green "[Export-ADHuntingModifiedDisplaySpecifiers][*] No modified Display Specifier objects found." }     
+}
+
 ########################################################
 #
 #
@@ -12762,6 +12950,11 @@ CSV / JSON file written to disk.
     Write-Host "[$($MyInvocation.MyCommand)][*] Enumeration of access rights / ownership on all objects in the default naming context, this may take a while...`n"
 
     Export-ADHuntingACLDangerousAccessRights -PrivilegedSIDs $PrivilegedSIDs
+    Write-Host ""
+    Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
+    $IntermediateCheckup = $sw.Elapsed.TotalSeconds
+
+    Export-ADHuntingModifiedDisplaySpecifiers
     Write-Host ""
     Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
     $IntermediateCheckup = $sw.Elapsed.TotalSeconds
