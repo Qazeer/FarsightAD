@@ -9931,7 +9931,7 @@ CSV / JSON file written to disk.
 
         catch {
             Write-Host -ForegroundColor DarkYellow "[Export-ADHuntingACLDefaultFromSchema][-] Error while processing schema class $($SchemaClass.DistinguishedName)"
-            Write-Host -ForegroundColor DarkYellow "[Export-ADHuntingACLDefaultFromSchema][-] defaultSecurityDescriptor is: $SchemaClass["defaultSecurityDescriptor"].Value"
+            Write-Host -ForegroundColor DarkYellow "[Export-ADHuntingACLDefaultFromSchema][-] defaultSecurityDescriptor is: $($SchemaClass["defaultSecurityDescriptor"].Value)"
             Write-Host -ForegroundColor DarkYellow "[Export-ADHuntingACLDefaultFromSchema][-] Exception: $_"
         }
     }
