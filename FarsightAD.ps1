@@ -9,6 +9,8 @@ Param(
     [Parameter(Mandatory=$False)][String]$ADDriveName = "ADHunting"
 )
 
+$Script:Offline = $False
+
 Add-Type -AssemblyName System.Security
 $ProgressPreference = 'SilentlyContinue'
 
@@ -23,11 +25,11 @@ $ProgressPreference = 'SilentlyContinue'
 $Script:OBJECT_MINIMAL_PROPERTIES_SET    = @(
                                    "Name",
                                    "ObjectGUID",
-                                   "DistinguishedName", 
+                                   "DistinguishedName",
                                    "ObjectClass"
                                    )
 
-$Script:ACCOUNT_MINIMAL_PROPERTIES_SET   = $OBJECT_MINIMAL_PROPERTIES_SET + 
+$Script:ACCOUNT_MINIMAL_PROPERTIES_SET   = $OBJECT_MINIMAL_PROPERTIES_SET +
                                   @(
                                     "Enabled",
                                     "SamAccountName",
@@ -250,6 +252,209 @@ If set, passed through the cmdlets of the ActiveDirectory module as a default pa
     }
     
     return $AllAttributes
+}
+
+function Get-ADDomainCustom {
+<#
+.SYNOPSIS
+
+Basic (re)implementation of the RSAT Get-ADDomain cmdlet, as this cmdlet does not work properly on a "mounted" / offline NTDS database.
+
+.DESCRIPTION
+
+Extract the domain root object basic information and create new attributes to the returned object to match Get-ADDomain output format.
+
+.PARAMETER Server
+
+Specifies the Active Directory Domain Services instance to connect to.
+If set, passed through the cmdlets of the ActiveDirectory module as a default parameter.
+
+.PARAMETER Credential
+
+Specifies the user account credentials to use to perform this task.
+If set, passed through the cmdlets of the ActiveDirectory module as a default parameter.
+
+#>
+    Param(
+        [Parameter(Mandatory=$False)][String]$Server = $null,
+        [Parameter(Mandatory=$False)][System.Management.Automation.PSCredential]$Credential = $null
+    )
+
+    $PSDefaultParameterValues = @{}
+
+    If (!$Server) {
+        $Server = (Get-ADDomain).PDCEmulator
+    }
+    $PSDefaultParameterValues.Add("*-AD*:Server", $Server)
+    $PSDefaultParameterValues.Add("*-ADHunting*:Server", $Server)
+
+    If ($Credential) {
+        $PSDefaultParameterValues.Add("*-AD*:Credential", $Credential)
+        $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
+    }
+
+    $domainObject = Get-ADObject -LDAPFilter "(objectClass=domain)" -Properties *
+
+    # $domainObject.DomainSID = $domainObject.objectSid
+    # $domainObject.DNSRoot = $domainObject.CanonicalName.TrimEnd('/')
+    $domainObject | Add-Member -Force -MemberType NoteProperty -Name DomainSID -Value $($domainObject.objectSid)
+    $domainObject | Add-Member -Force -MemberType NoteProperty -Name DNSRoot -Value $($domainObject.CanonicalName.TrimEnd('/'))
+    
+    $domainObject.wellKnownObjects | ForEach-Object { 
+        If ($_.StartsWith("B:32:AB1D30F3768811D1ADED00C04FD8D5CD")) {
+            try { $domainObject.SystemsContainer = $_.Split(':')[3] }
+            catch { $domainObject.SystemsContainer = $null }
+        }
+    }
+
+    return $domainObject
+}
+
+function Get-ADForestCustom {
+    <#
+    .SYNOPSIS
+    
+    Call RSAT Get-ADForest cmdlet with specific error handling, as this cmdlet does not work properly on a "mounted" / offline NTDS database.
+    
+    .PARAMETER Server
+    
+    Specifies the Active Directory Domain Services instance to connect to.
+    If set, passed through the cmdlets of the ActiveDirectory module as a default parameter.
+    
+    .PARAMETER Credential
+    
+    Specifies the user account credentials to use to perform this task.
+    If set, passed through the cmdlets of the ActiveDirectory module as a default parameter.
+    
+    #>
+        Param(
+            [Parameter(Mandatory=$False)][String]$Server = $null,
+            [Parameter(Mandatory=$False)][System.Management.Automation.PSCredential]$Credential = $null
+        )
+    
+        $PSDefaultParameterValues = @{}
+    
+        If (!$Server) {
+            $Server = (Get-ADDomain).PDCEmulator
+        }
+        $PSDefaultParameterValues.Add("*-AD*:Server", $Server)
+        $PSDefaultParameterValues.Add("*-ADHunting*:Server", $Server)
+    
+        If ($Credential) {
+            $PSDefaultParameterValues.Add("*-AD*:Credential", $Credential)
+            $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
+        }
+    
+    try {
+        return Get-ADForest
+    }
+    
+    catch [System.ArgumentException], [System.Management.Automation.ErrorRecord] {
+        If ($_.Exception.Message -icontains "One or more properties are invalid. (Parameter 'Server')" -and $Script:Offline) {
+            return $null
+        }
+        Else {
+            throw $_
+        }
+    }
+
+    catch {e
+        throw $_
+    }
+}
+
+function Get-ADGroupMemberCustom {
+<#
+.SYNOPSIS
+
+Basic (re)implementation of the RSAT Get-ADGroupMember cmdlet, as this cmdlet does not work properly on a "mounted" / offline NTDS database.
+
+.DESCRIPTION
+
+Enumerate the members of the specified group using the group's Members attribute and retrieve basic information for each member using Get-ADObject.
+
+.PARAMETER Server
+
+Specifies the Active Directory Domain Services instance to connect to.
+If set, passed through the cmdlets of the ActiveDirectory module as a default parameter.
+
+.PARAMETER Credential
+
+Specifies the user account credentials to use to perform this task.
+If set, passed through the cmdlets of the ActiveDirectory module as a default parameter.
+
+.PARAMETER Identity
+
+Specifies an Active Directory group object by providing one value supported by Get-ADGroup.
+
+.PARAMETER Recursive
+
+Recursively process group members, resolving members of nested subgroup(s).
+
+.OUTPUTS
+
+[System.Collections.Generic.List[Microsoft.ActiveDirectory.Management.ADObject]]
+
+#>
+
+Param(
+        [Parameter(Mandatory=$False)][String]$Server = $null,
+        [Parameter(Mandatory=$False)][System.Management.Automation.PSCredential]$Credential = $null,
+        [Parameter(Mandatory=$True)][Microsoft.ActiveDirectory.Management.ADGroup]$Identity,
+        [Parameter(Mandatory=$False)][Switch]$Recursive
+    )
+
+    $PSDefaultParameterValues = @{}
+
+    If (!$Server) {
+        $Server = (Get-ADDomain).PDCEmulator
+    }
+    $PSDefaultParameterValues.Add("*-AD*:Server", $Server)
+    $PSDefaultParameterValues.Add("*-ADHunting*:Server", $Server)
+
+    If ($Credential) {
+        $PSDefaultParameterValues.Add("*-AD*:Credential", $Credential)
+        $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
+    }
+
+    $InitialMembers = $(Get-ADGroup -Identity $SID -Properties Members).Members
+
+    if (!$Recursive) {
+        return $InitialMembers | ForEach-Object { Get-ADObject -LDAPFilter "(DistinguishedName=$_)" -Properties objectSid }
+    }
+
+    else {
+        # Set used to keep track of already enumerated objects (to avoid infinite recursion).
+        $GroupMembersOutput = New-Object 'System.Collections.Generic.HashSet[Microsoft.ActiveDirectory.Management.ADObject]'
+    
+        # Enumerate the members of the group. Retrieving all members recursively (including intermediate nested groups).
+        $MembersQueue = New-Object System.Collections.Queue
+        foreach ($Member in $InitialMembers) {
+            $MembersQueue.Enqueue($Member)
+        }
+
+        While ($MembersQueue.Count -ne 0) {
+            $MemberDN = $MembersQueue.Dequeue()
+            $Member = Get-ADObject -LDAPFilter "(DistinguishedName=$MemberDN)" -Properties ObjectClass, objectSid
+            If ($null -eq $Member -or $GroupMembersOutput.Contains($Member)) {
+                continue
+            }
+
+            if ($Member.ObjectClass -eq "group") {
+                $null = $GroupMembersOutput.Add($Member)
+
+                $NestedMembers = $(Get-ADGroup -Identity $Member.DistinguishedName -Properties Members).Members
+                foreach ($Member in $NestedMembers) {
+                    $MembersQueue.Enqueue($Member)
+                }
+            }
+            else {
+                $null = $GroupMembersOutput.Add($Member)
+            }
+        }
+
+        return [System.Collections.Generic.List[Microsoft.ActiveDirectory.Management.ADObject]] $GroupMembersOutput
+    }
 }
 
 function Get-GPOFromGPLink {
@@ -3134,7 +3339,7 @@ Specifies the attributes to replicate as an array of attributes' ldap display na
         }
     }
 
-    $ADDomain = Get-ADDomain
+    $ADDomain = Get-ADDomainCustom
     $ADSchemaNamingContext = $(Get-ADRootDSE).SchemaNamingContext
 
     # Use the Server specifed in argument only if its not an IPv4.
@@ -3298,7 +3503,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Hidden_object_enumerated_through_DRS_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
@@ -3548,22 +3753,28 @@ S-1-5-21-898253280-1155539434-3291038768-519
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $Domain = Get-ADDomain
-    $DomainSID = $Domain.DomainSID
+    $Domain = Get-ADDomainCustom
+    $DomainSID = $Domain.DomainSID.Value
 
     # Retrieve the forest root domain SID base. 
     try {
         If ($null -eq $Domain.ParentDomain) {
-            $ForestSID = $DomainSID  
+            $ForestSID = $DomainSID
         }
         Else {
-            $RootDomainName = $(Get-ADForest).RootDomain
+            Write-Host $Domain.ParentDomain
+            $RootDomainName = $(Get-ADForestCustom).RootDomain
             $ForestSID = $(Get-ADObject -LDAPFilter "(&(ObjectClass=trustedDomain)(Name=$RootDomainName)" -Properties securityIdentifier).securityIdentifier
         }
     }
     catch {
-        Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Couldn't determine the forest's root domain SID"
-        Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Exception: $_"
+        If ($Script:Offline) {
+            Write-Verbose "[$($MyInvocation.MyCommand)][-] Couldn't determine the forest's root domain SID, but running in offline so error is expected"
+        }
+        Else {
+            Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Couldn't determine the forest's root domain SID"
+            Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Exception: $_"
+        }
     }
 
     
@@ -3705,22 +3916,27 @@ S-1-5-9
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $Domain = Get-ADDomain
-    $DomainSID = $Domain.DomainSID
+    $Domain = Get-ADDomainCustom
+    $DomainSID = $Domain.DomainSID.Value
 
     # Retrieve the forest root domain SID base. 
     try {
         If ($null -eq $Domain.ParentDomain) {
-            $ForestSID = $DomainSID  
+            $ForestSID = $DomainSID
         }
         Else {
-            $RootDomainName = $(Get-ADForest).RootDomain
+            $RootDomainName = $(Get-ADForestCustom).RootDomain
             $ForestSID = $(Get-ADObject -LDAPFilter "(&(ObjectClass=trustedDomain)(Name=$RootDomainName)" -Properties securityIdentifier).securityIdentifier
         }
     }
     catch {
-        Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Couldn't determine the forest's root domain SID"
-        Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Exception: $_"
+        If ($Script:Offline) {
+            Write-Verbose "[$($MyInvocation.MyCommand)][-] Couldn't determine the forest's root domain SID, but running in offline so error is expected"
+        }
+        Else {
+            Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Couldn't determine the forest's root domain SID"
+            Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Exception: $_"
+        }
     }
 
     [System.Collections.ArrayList] $PrivilegedSIDsInit = Get-ADHuntingBuiltinPrivilegedGroupSIDs
@@ -3756,7 +3972,7 @@ S-1-5-9
     While ($PrivilegedSIDsQueue.Count -ne 0) {
         $SID = $PrivilegedSIDsQueue.Dequeue()
 
-        If ($PrivilegedSIDsOutput.Contains($SID)) {
+        If ($null -eq $SID -or $PrivilegedSIDsOutput.Contains($SID)) {
             continue
         }
         
@@ -3764,8 +3980,8 @@ S-1-5-9
 
         try {
             If ((Get-ADObject -LDAPFilter "(objectsid=$SID)" -Properties ObjectClass).ObjectClass -eq "group") {
-                Get-ADGroupMember -Identity $SID | Where-Object { !$PrivilegedSIDsOutput.Contains($_.SID) } | ForEach-Object { 
-                    $PrivilegedSIDsQueue.Enqueue($_.SID.Value)
+                Get-ADGroupMemberCustom -Identity $SID | Where-Object { !$PrivilegedSIDsOutput.Contains($_.objectSid.Value) } | ForEach-Object {
+                    $PrivilegedSIDsQueue.Enqueue($_.objectSid.Value)
                 }
             }
         }
@@ -3849,7 +4065,7 @@ S-1-5-21-898253280-1155539434-3291038768-515
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainSID = (Get-ADDomain).DomainSID
+    $DomainSID = (Get-ADDomainCustom).DomainSID.Value
 
     [System.Collections.ArrayList] $UnprivilegedSIDs = @(
         # World group, "that includes all users" (SID S-1-1-0).
@@ -4094,7 +4310,7 @@ Used for optimization purposes for subsequent calls to AD Hunting functions.
     [void] $AllPrivilegedObjects.Add($(Get-ADObject -LDAPFilter "(name=AdminSDHolder)" -Properties $OBJECT_MINIMAL_PROPERTIES_SET))
     
     # Add Domain Controllers group.
-    $DCSID = (New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::AccountControllersSid, (Get-ADDomain).DomainSID)).Value
+    $DCSID = (New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::AccountControllersSid, (Get-ADDomainCustom).DomainSID.Value)).Value
     [void] $AllPrivilegedObjects.Add($(Get-ADObject -LDAPFilter "(objectSid=$DCSID)" -Properties $OBJECT_MINIMAL_PROPERTIES_SET))
     
     # Add Domain Controllers OU.
@@ -4213,20 +4429,21 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
+
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Principals_Privileged_Accounts_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
     Write-Host "[$($MyInvocation.MyCommand)][*] Enumerating privileged principals..."
 
     [System.Collections.ArrayList] $PrivilegedGroupSIDs = Get-ADHuntingBuiltinPrivilegedGroupSIDs
-
     # Enumerate all accounts in PrivilegedGroupSIDs and adding them to a set.
     $AccountsSIDSet = New-Object System.Collections.Generic.HashSet[String]
 
     foreach ($SID in $PrivilegedGroupSIDs) {
         try {
-            Get-ADGroupMember -Recursive -Identity $SID | ForEach-Object { $null = $AccountsSIDSet.Add($_.SID) }
+            # Get-ADGroupMember -Recursive -Identity $SID | ForEach-Object { $null = $AccountsSIDSet.Add($_.SID) }
+            Get-ADGroupMemberCustom -Recursive -Identity $SID | ForEach-Object { $null = $AccountsSIDSet.Add($_.objectSid.Value) }
         }
 
         catch {
@@ -4255,7 +4472,7 @@ CSV / JSON file written to disk.
             # ${function:Get-X509CertificateStringFromUserCertificate} = $using:funcDefGetCertificatesStringFromCertificates
 
             $Account = Get-ADObject -LDAPFilter "(objectsid=$_)" -Properties $SpecificPropertiesSet
-                       
+            
             $null = $Output.Add([PSCustomObject]@{
                 Domain = $DomainName
                 SamAccountName = $Account["SamAccountName"].Value
@@ -4369,7 +4586,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Principals_Once_Privileged_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -4387,7 +4604,9 @@ CSV / JSON file written to disk.
     $PrivilegedUsersSIDs = New-Object System.Collections.ArrayList
     foreach ($SID in $PrivilegedGroupSIDs) {
         try {
-            [void] $PrivilegedUsersSIDs.AddRange(@((Get-ADGroupMember -Recursive -Identity $SID).SID.Value))
+            # [void] $PrivilegedUsersSIDs.AddRange(@((Get-ADGroupMember -Recursive -Identity $SID).SID.Value))
+            # $(Get-ADGroup -Identity $SID -Properties Members).Members | ForEach-Object { Get-ADObject -LDAPFilter "(DistinguishedName=$_)" } | ForEach-Object { $null = $AccountsSIDSet.Add($_.SID) }
+            [void] $PrivilegedUsersSIDs.AddRange(@((Get-ADGroupMemberCustom -Recursive -Identity $SID).objectSid.Value))
         }
         catch {
             # Skip error related to Enterprise Admins SID.
@@ -4531,7 +4750,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Principals_Privileged_Technical_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -4685,7 +4904,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Principals_Privileged_Groups_Membership_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -4865,7 +5084,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Principals_Added_Via_MachineAccountQuota_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -5014,7 +5233,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Principals_PrimaryGroupIDs_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -5182,7 +5401,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Principals_SIDHistory_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -5195,7 +5414,7 @@ CSV / JSON file written to disk.
         return
     }
 
-    $DomainSID = (Get-ADDomain).DomainSID.Value
+    $DomainSID = (Get-ADDomainCustom).DomainSID.Value
     $DomainsTable = @{$DomainSID = $DomainName}
     Get-ADObject -LDAPFilter "(ObjectClass=trustedDomain)" -Properties securityIdentifier | ForEach-Object {
         $DomainsTable[$_.securityIdentifier.ToString()] = $_.Name
@@ -5808,7 +6027,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Principals_ShadowCredentials_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -6030,7 +6249,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("Get-Class*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_ADCS_Principals_UserPrincipalName_and_AltSecID_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -6272,7 +6491,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_ADCS_Principals_Certificates_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
     
@@ -6531,7 +6750,7 @@ CSV / JSON file written to disk.
     
     Add-PrivilegeLevelType
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPKSObjectsPath = "$OutputFolder\${DomainName}_ADCS_Public_Key_Services_objects_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"   
     $OutputRogueNTAuthCertificatesCAPath = "$OutputFolder\${DomainName}_ADCS_Possible_Rogue_NTAuthCertificates_CA_Certificate_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"   
@@ -6891,7 +7110,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("New-PSDrive:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_ADCS_Certificates_Templates_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
    
@@ -7190,7 +7409,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Principals_DontRequirePreAuth_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -7372,7 +7591,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("Is-DangerousADACE:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_ACL_Privileged_Objects_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -7572,9 +7791,9 @@ CSV / JSON file written to disk.
 
     Write-Host "[$($MyInvocation.MyCommand)][*] Enumerating default ACL from Schema Classes..."
 
-    $Domain = Get-ADDomain
+    $Domain = Get-ADDomainCustom
     $DomainName = $Domain.DNSRoot
-    $DomainSID = $Domain.DomainSID
+    $DomainSID = $Domain.DomainSID.Value
 
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_ACL_Schema_Classes_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
@@ -7582,16 +7801,21 @@ CSV / JSON file written to disk.
     # Retrieve the forest root domain SID base. 
     try {
         If ($null -eq $Domain.ParentDomain) {
-            $ForestSID = $DomainSID  
+            $ForestSID = $DomainSID.Value
         }
         Else {
-            $RootDomainName = $(Get-ADForest).RootDomain
+            $RootDomainName = $(Get-ADForestCustom).RootDomain
             $ForestSID = $(Get-ADObject -LDAPFilter "(&(ObjectClass=trustedDomain)(Name=$RootDomainName)" -Properties securityIdentifier).securityIdentifier
         }
     }
     catch {
-        Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Couldn't determine the forest's root domain SID"
-        Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Exception: $_"
+        If ($Script:Offline) {
+            Write-Verbose "[$($MyInvocation.MyCommand)][-] Couldn't determine the forest's root domain SID, but running in offline so error is expected"
+        }
+        Else {
+            Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Couldn't determine the forest's root domain SID"
+            Write-Host -ForegroundColor DarkYellow "[$($MyInvocation.MyCommand)][-] Exception: $_"
+        }
     }
 
     # Work around if the Enterprise Admins SID (S-1-5-<FOREST>-519) of the forest couldn't be resolved, to replace EA by DA SID, in order to consider that the right is granted to a privileged principal.
@@ -7600,7 +7824,7 @@ CSV / JSON file written to disk.
         $EASID = (New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::AccountEnterpriseAdminsSid, $ForestSID)).Value
     }
     Else {
-        $EASID = (New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::AccountDomainAdminsSid, $ForestSID)).Value
+        $EASID = (New-Object System.Security.Principal.SecurityIdentifier ([System.Security.Principal.WellKnownSidType]::AccountDomainAdminsSid, $DomainSID)).Value
     }
 
     # https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/f4296d69-1c0f-491f-9587-a960b292d070
@@ -9817,36 +10041,46 @@ CSV / JSON file written to disk.
 
     $SchemaClasses = Get-ADObject -SearchBase $SchemaNamingContext -LDAPFilter "(&(objectClass=classSchema)(defaultSecurityDescriptor=*)(!(defaultSecurityDescriptor=D:S:))(!(defaultSecurityDescriptor=D:)))" -Properties lDAPDisplayName, adminDescription, defaultSecurityDescriptor, schemaIDGUID
     
-    $Output = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    # $Output = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
     
-    $SchemaClassCount = [ref] 0
-    $UnknownDefaultSecDesc = [ref] 0
-    $NonDefaultSecDesc = [ref] 0
-    $DangerousACECount = [ref] 0
-    $DangerousACECountGrantedToEveryone = [ref] 0
+    # $SchemaClassCount = [ref] 0
+    # $UnknownDefaultSecDesc = [ref] 0
+    # $NonDefaultSecDesc = [ref] 0
+    # $DangerousACECount = [ref] 0
+    # $DangerousACECountGrantedToEveryone = [ref] 0
 
-    $SchemaClasses | ForEach-Object -Parallel {
+    $Output = New-Object System.Collections.ArrayList
+    
+    $SchemaClassCount = 0
+    $UnknownDefaultSecDesc = 0
+    $NonDefaultSecDesc = 0
+    $DangerousACECount = 0
+    $DangerousACECountGrantedToEveryone = 0
+
+    # Removed multi-threading as it was causing issue with SetSecurityDescriptorSddlForm (the function would not parse the SDDL for some reason in a multi-threaded loop - even with a timeout, works fine in a linear loop)
+    # $SchemaClasses | ForEach-Object -Parallel {
+    $SchemaClasses | ForEach-Object {
         try {
-            $Output = $using:Output
-            $PSDefaultParameterValues = $using:PSDefaultParameterValues
-            $ACE_GUID_MAPPING = $using:ACE_GUID_MAPPING
-            $DomainName = $using:DomainName
-            $OnlyDangerous = $using:OnlyDangerous
-            $SDDL_ALIAS_TO_SID = $using:SDDL_ALIAS_TO_SID
-            $SchemaVersion = $using:SchemaVersion
-            $CLASSES_DEFAULT_SECURITY_DESCRIPTORS = $using:CLASSES_DEFAULT_SECURITY_DESCRIPTORS
-            $PrivilegedSIDs = $using:PrivilegedSIDs
-            $UnprivilegedSIDs = $using:UnprivilegedSIDs
-            $SchemaClassCount = $using:SchemaClassCount
-            $UnknownDefaultSecDesc = $using:UnknownDefaultSecDesc
-            $NonDefaultSecDesc = $using:NonDefaultSecDesc
-            $DangerousACECount = $using:DangerousACECount
-            $DangerousACECountGrantedToEveryone = $using:DangerousACECountGrantedToEveryone
-            ${function:Is-DangerousADACE} = $using:funcDefIsDangerousACE
+            # $Output = $using:Output
+            # $PSDefaultParameterValues = $using:PSDefaultParameterValues
+            # $ACE_GUID_MAPPING = $using:ACE_GUID_MAPPING
+            # $DomainName = $using:DomainName
+            # $OnlyDangerous = $using:OnlyDangerous
+            # $SDDL_ALIAS_TO_SID = $using:SDDL_ALIAS_TO_SID
+            # $SchemaVersion = $using:SchemaVersion
+            # $CLASSES_DEFAULT_SECURITY_DESCRIPTORS = $using:CLASSES_DEFAULT_SECURITY_DESCRIPTORS
+            # $PrivilegedSIDs = $using:PrivilegedSIDs
+            # $UnprivilegedSIDs = $using:UnprivilegedSIDs
+            # $SchemaClassCount = $using:SchemaClassCount
+            # $UnknownDefaultSecDesc = $using:UnknownDefaultSecDesc
+            # $NonDefaultSecDesc = $using:NonDefaultSecDesc
+            # $DangerousACECount = $using:DangerousACECount
+            # $DangerousACECountGrantedToEveryone = $using:DangerousACECountGrantedToEveryone
+            # ${function:Is-DangerousADACE} = $using:funcDefIsDangerousACE
             
             $SchemaClass = $_
 
-            $null = [Threading.Interlocked]::Increment($SchemaClassCount)
+            # $null = [Threading.Interlocked]::Increment($SchemaClassCount)
 
             $SchemaClassReplicationMetadata = Get-ADReplicationAttributeMetadata -IncludeDeletedObjects -ShowAllLinkedValues "$($SchemaClass.DistinguishedName)" -Properties defaultSecurityDescriptor
 
@@ -9862,11 +10096,13 @@ CSV / JSON file written to disk.
             }
             Else {
                 $IsSecurityDescriptorDefault = "UnknownACLForClass"
-                $null = [Threading.Interlocked]::Increment($UnknownDefaultSecDesc)
+                # $null = [Threading.Interlocked]::Increment($UnknownDefaultSecDesc)
+                $UnknownDefaultSecDesc = $UnknownDefaultSecDesc + 1
             }
 
             If ($IsSecurityDescriptorDefault -eq $False) {
-                $null = [Threading.Interlocked]::Increment($NonDefaultSecDesc)
+                # $null = [Threading.Interlocked]::Increment($NonDefaultSecDesc)
+                $NonDefaultSecDesc = $NonDefaultSecDesc + 1
             }
 
             # Use SDDL_ALIAS_TO_SID to replace domain principals aliases (DA, EA, etc.) by their SID.
@@ -9880,9 +10116,9 @@ CSV / JSON file written to disk.
 
             $SchemaClassACL = New-Object System.DirectoryServices.ActiveDirectorySecurity
             $SchemaClassACL.SetSecurityDescriptorSddlForm($SecDescriptorAsSDDL)
-            
+
             If ($SchemaClassACL.Access.Count -eq 0) {
-                throw "SetSecurityDescriptorSddlForm returned a security descriptor with no (D)ACL"
+                throw "SetSecurityDescriptorSddlForm returned a security descriptor with no (D)ACL from SDDL: $SecDescriptorAsSDDL"
             }
             
             foreach ($ACE in $SchemaClassACL.Access) {
@@ -9895,8 +10131,12 @@ CSV / JSON file written to disk.
                 $IsDangerous = $False
                 If (Is-DangerousADACE -ObjectClass $SchemaClass["ObjectClass"].Value -ACE $ACE -AttributedToSID $AttributedToSID -PrivilegedSIDs $PrivilegedSIDs) {
                     $IsDangerous = $True
-                    $null = [Threading.Interlocked]::Increment($DangerousACECount)
-                    If ($IsGrantedToEveryone) { $null = [Threading.Interlocked]::Increment($DangerousACECountGrantedToEveryone) }
+                    # $null = [Threading.Interlocked]::Increment($DangerousACECount)
+                    $DangerousACECount = $DangerousACECount + 1
+                    If ($IsGrantedToEveryone) { 
+                        # $null = [Threading.Interlocked]::Increment($DangerousACECountGrantedToEveryone)
+                        $DangerousACECountGrantedToEveryone = $DangerousACECountGrantedToEveryone + 1
+                    }
                 }
 
                 If ($OnlyDangerous -and !$IsDangerous) {
@@ -9937,10 +10177,16 @@ CSV / JSON file written to disk.
     }
     
     If ($Output.Count -gt 0) {
-        Write-Host "[$($MyInvocation.MyCommand)][*] Enumerated default ACL of $($SchemaClassCount.Value) Schema classes with defaultSecurityDescriptor, for a total of $($Output.Count) access rights found"
-        Write-Host "[$($MyInvocation.MyCommand)][*] Found $($NonDefaultSecDesc.Value) defaultSecurityDescriptor with a non-default value (and $($UnknownDefaultSecDesc.Value) defaultSecurityDescriptor for unknown Schema classes)"
-        Write-Host "[$($MyInvocation.MyCommand)][*] Found $($DangerousACECount.Value) dangerous access rights that would allow new objects takeover granted to non privileged principals"
-        Write-Host "[$($MyInvocation.MyCommand)][*] Including $($DangerousACECountGrantedToEveryone.Value) dangerous access rights granted to everyone"
+        # Write-Host "[$($MyInvocation.MyCommand)][*] Enumerated default ACL of $($SchemaClassCount.Value) Schema classes with defaultSecurityDescriptor, for a total of $($Output.Count) access rights found"
+        # Write-Host "[$($MyInvocation.MyCommand)][*] Found $($NonDefaultSecDesc.Value) defaultSecurityDescriptor with a non-default value (and $($UnknownDefaultSecDesc.Value) defaultSecurityDescriptor for unknown Schema classes)"
+        # Write-Host "[$($MyInvocation.MyCommand)][*] Found $($DangerousACECount.Value) dangerous access rights that would allow new objects takeover granted to non privileged principals"
+        # Write-Host "[$($MyInvocation.MyCommand)][*] Including $($DangerousACECountGrantedToEveryone.Value) dangerous access rights granted to everyone"
+        
+        Write-Host "[$($MyInvocation.MyCommand)][*] Enumerated default ACL of $($SchemaClassCount) Schema classes with defaultSecurityDescriptor, for a total of $($Output.Count) access rights found"
+        Write-Host "[$($MyInvocation.MyCommand)][*] Found $($NonDefaultSecDesc) defaultSecurityDescriptor with a non-default value (and $($UnknownDefaultSecDesc) defaultSecurityDescriptor for unknown Schema classes)"
+        Write-Host "[$($MyInvocation.MyCommand)][*] Found $($DangerousACECount) dangerous access rights that would allow new objects takeover granted to non privileged principals"
+        Write-Host "[$($MyInvocation.MyCommand)][*] Including $($DangerousACECountGrantedToEveryone) dangerous access rights granted to everyone"
+        
         If ($OutputType -eq "CSV") {
             $Output | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $OutputPath
         }
@@ -10028,7 +10274,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("Is-DangerousADACE:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPathAccessRights = "$OutputFolder\${DomainName}_ACL_Dangerous_Access_Rights_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
@@ -10483,7 +10729,7 @@ Specifies the format for the exported data (CSV or JSON). Defaults to CSV.
         $PSDefaultParameterValues.Add("Is-DangerousKerberosDelegation:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Kerberos_Delegations_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -10796,8 +11042,8 @@ CSV / JSON file written to disk.
     If (!$Server) {
         $Server = (Get-ADDomain).PDCEmulator
     }
-    $PSDefaultParameterValues.Add("Get-ADDomain:Server", $Server)
-    $PSDefaultParameterValues.Add("Get-ADForest:Server", $Server)
+    $PSDefaultParameterValues.Add("Get-ADDomain*:Server", $Server)
+    $PSDefaultParameterValues.Add("Get-ADForest*:Server", $Server)
     $PSDefaultParameterValues.Add("*-ADHunting*:Server", $Server)
 
     If ($Credential) {
@@ -10805,7 +11051,7 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("*-ADHunting*:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_Trusts_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
@@ -10818,7 +11064,7 @@ CSV / JSON file written to disk.
     # Process first the trust of the current domain, defined by the server parameter.
     # As using the DNS hostname rather than the eventually provided server can create issue for execution on non-domain joined system.
     $null = $Domains.Add($Server)
-    $null = $Domains.AddRange(@((Get-ADForest).Domains | Where-Object { $_ -cne $DomainName}))
+    $null = $Domains.AddRange(@((Get-ADForestCustom).Domains | Where-Object { $_ -cne $DomainName}))
     $Domains | ForEach-Object -Parallel {
         try {
             $Output = $using:Output
@@ -11053,14 +11299,14 @@ CSV / JSON file written to disk.
         $PSDefaultParameterValues.Add("Is-DangerousFileACE:Credential", $Credential)
     }
 
-    $DomainName = (Get-ADDomain).DNSRoot
+    $DomainName = (Get-ADDomainCustom).DNSRoot
     $OutputFolder = If (!$OutputFolder) { "." } Else { $OutputFolder }
     $OutputPath = "$OutputFolder\${DomainName}_GPO_ownership_and_access_rights_$(Get-Date -f yyyy-MM-dd-HHmmss).$($OutputType.ToLower())"
 
     Write-Host "[$($MyInvocation.MyCommand)][*] Enumerating GPO objects and files ownership and access rights..."
 
 
-    $DomainDnsName = (Get-ADDomain).DNSRoot
+    $DomainDnsName = (Get-ADDomainCustom).DNSRoot
     $SYSVOLPath = "\\$DomainDnsName\SYSVOL"
     $SYSVOLMountPath = "\\$Server\SYSVOL"
     $DCRegex = "^\\\\($DomainName|$DomainDnsName|$Server)"
@@ -11080,7 +11326,7 @@ CSV / JSON file written to disk.
     $GPOLinkedOnPrivilegedContainers, $GPOLinkedOnNonPrivilegedContainers = Get-ADHuntingGPOLinkedHashMap -PrivilegedContainers $PrivilegedContainers
 
     # Enumerate all GPOs.
-    $GPOObjects = Get-ADObject -SearchBase "$((Get-ADDomain).SystemsContainer)" -LDAPFilter "(objectClass=groupPolicyContainer)" -Properties displayName,gPCFileSysPath,whenCreated,whenChanged
+    $GPOObjects = Get-ADObject -SearchBase "$((Get-ADDomainCustom).SystemsContainer)" -LDAPFilter "(objectClass=groupPolicyContainer)" -Properties displayName,gPCFileSysPath,whenCreated,whenChanged
     
     $funcDefAddPrivilegeLevelType = ${function:Add-PrivilegeLevelType}.ToString()
     $funcDefIsDangerousADACE = ${function:Is-DangerousADACE}.ToString()
@@ -12083,7 +12329,7 @@ Multipe CSV / JSON files written to disk, one file per GPO settings type.
         $PSDefaultParameterValues.Add("New-PSDrive:Credential", $Credential)
     }
 
-    $ADDomainObject = Get-ADDomain
+    $ADDomainObject = Get-ADDomainCustom
     $DomainName = $ADDomainObject.Name
     $DomainDnsName = $ADDomainObject.DNSRoot
     $SystemContainer = $ADDomainObject.SystemsContainer
@@ -12612,6 +12858,7 @@ CSV / JSON file written to disk.
         [Parameter(Mandatory=$False)][String]$Server = $null,
         [Parameter(Mandatory=$False)][System.Management.Automation.PSCredential]$Credential = $null,
         [Parameter(Mandatory=$False)][String]$ADDriveName = "ADHunting",
+        [Parameter(Mandatory=$False)][Switch]$Offline,   
         [Parameter(Mandatory=$False)][String]$OutputFolder,
         [Parameter(Mandatory=$False)]
             [ValidateSet("JSON","CSV")]
@@ -12645,15 +12892,21 @@ CSV / JSON file written to disk.
                            __/ |                          
                           |___/                           
                       
-                             v1.0 -- Thomas DIOT (_Qazeer)
+                             v1.1 -- Thomas DIOT (_Qazeer)
 
 "@
-
+   
     Write-Host $banner
     $sw = [Diagnostics.Stopwatch]::StartNew()
 
     Write-Host "[$($MyInvocation.MyCommand)][*] Starting AD Hunting...`n"
     
+    $Script:Offline = $Offline
+
+    if ($Script:Offline) {
+        Write-Host "[$($MyInvocation.MyCommand)][*] Running in offline mode, only a subset of compatible hunting cmdlets will be executed`n"
+    }
+
     Write-Host "[$($MyInvocation.MyCommand)][*] Enumeration of all privileged principals SIDs..."
     $PrivilegedSIDs = Get-ADHuntingAllPrivilegedSIDs
     Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds, 2)) seconds`n"
@@ -12664,11 +12917,13 @@ CSV / JSON file written to disk.
     Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
     $IntermediateCheckup = $sw.Elapsed.TotalSeconds
 
-    Export-ADHuntingHiddenObjectsWithDRSRepData
-    Write-Host ""
-    Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
-    $IntermediateCheckup = $sw.Elapsed.TotalSeconds
-        
+    if (!$Script:Offline) {
+        Export-ADHuntingHiddenObjectsWithDRSRepData
+        Write-Host ""
+        Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
+        $IntermediateCheckup = $sw.Elapsed.TotalSeconds
+    }
+
     Export-ADHuntingPrincipalsOncePrivileged
     Write-Host ""
     Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
@@ -12744,20 +12999,26 @@ CSV / JSON file written to disk.
     Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
     $IntermediateCheckup = $sw.Elapsed.TotalSeconds
 
-    Export-ADHuntingGPOObjectsAndFilesACL  -PrivilegedSIDs $PrivilegedSIDs
-    Write-Host ""
-    Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
-    $IntermediateCheckup = $sw.Elapsed.TotalSeconds
+    if (!$Script:Offline) {
+        Export-ADHuntingGPOObjectsAndFilesACL  -PrivilegedSIDs $PrivilegedSIDs
+        Write-Host ""
+        Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
+        $IntermediateCheckup = $sw.Elapsed.TotalSeconds
+    }
 
-    Export-ADHuntingGPOSettings -PrivilegedSIDs $PrivilegedSIDs
-    Write-Host ""
-    Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
-    $IntermediateCheckup = $sw.Elapsed.TotalSeconds
+    if (!$Script:Offline) {
+        Export-ADHuntingGPOSettings -PrivilegedSIDs $PrivilegedSIDs
+        Write-Host ""
+        Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
+        $IntermediateCheckup = $sw.Elapsed.TotalSeconds
+    }
 
-    Export-ADHuntingTrusts
-    Write-Host ""
-    Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
-    $IntermediateCheckup = $sw.Elapsed.TotalSeconds
+    if (!$Script:Offline) {
+        Export-ADHuntingTrusts
+        Write-Host ""
+        Write-Host "[*] Enumeration done in: $([math]::Round($sw.Elapsed.TotalSeconds - $IntermediateCheckup, 2)) seconds`n"
+        $IntermediateCheckup = $sw.Elapsed.TotalSeconds
+    }
 
     Write-Host "[$($MyInvocation.MyCommand)][*] Enumeration of access rights / ownership on all objects in the default naming context, this may take a while...`n"
 
@@ -12778,7 +13039,9 @@ If (!$MyInvocation.MyCommand.Name.EndsWith(".ps1")) {
     If ($Server) { $PSDefaultParameterValues.Add("Invoke-ADHunting:Server", $Server) }
     If ($Credential) { $PSDefaultParameterValues.Add("Invoke-ADHunting:Credential", $Credential) }
     If ($ADDriveName) { $PSDefaultParameterValues.Add("Invoke-ADHunting:ADDriveName", $ADDriveName) }
+    If ($Offline) { $PSDefaultParameterValues.Add("Invoke-ADHunting:Offline", $Offline) }
     If ($OutputFolder) { $PSDefaultParameterValues.Add("Invoke-ADHunting:OutputFolder", $OutputFolder) }
     If ($OutputType) { $PSDefaultParameterValues.Add("Invoke-ADHunting:OutputType", $OutputType) }
+
     Invoke-ADHunting
 }
